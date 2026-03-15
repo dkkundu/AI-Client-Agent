@@ -1,4 +1,4 @@
-import sqlite3 from 'sqlite3';
+import Database from 'better-sqlite3';
 import mysql from 'mysql2/promise';
 import { Pool as PgPool } from 'pg';
 import { MongoClient } from 'mongodb';
@@ -21,16 +21,13 @@ class DatabaseManager {
   async testConnection(config: DbConfig): Promise<boolean> {
     try {
       if (config.type === 'sqlite') {
-        return new Promise((resolve) => {
-           // For testing just open memory or use provided path
-          const db = new sqlite3.Database(config.database || ':memory:', (err) => {
-            if (err) resolve(false);
-            else {
-              db.close();
-              resolve(true);
-            }
-          });
-        });
+        try {
+          const db = new Database(config.database || ':memory:');
+          db.close();
+          return true;
+        } catch {
+          return false;
+        }
       } else if (config.type === 'mysql') {
         const conn = await mysql.createConnection({
           host: config.host,
@@ -77,17 +74,9 @@ class DatabaseManager {
     
     try {
       if (config.type === 'sqlite') {
-        return new Promise((resolve) => {
-          this.connection = new sqlite3.Database(config.database || 'llm_client.sqlite', (err) => {
-            if (err) {
-              console.error('Failed to connect to SQLite:', err.message);
-              resolve(false);
-            } else {
-              this.activeConfig = config;
-              resolve(true);
-            }
-          });
-        });
+        this.connection = new Database(config.database || 'llm_client.sqlite');
+        this.activeConfig = config;
+        return true;
       } else if (config.type === 'mysql') {
         this.connection = await mysql.createPool({
           host: config.host,

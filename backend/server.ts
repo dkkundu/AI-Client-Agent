@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import axios from 'axios';
 import { dbManager, DbConfig } from './db';
+import { authManager } from './auth';
 
 dotenv.config();
 
@@ -91,6 +92,30 @@ app.get('/api/files/list', async (req, res) => {
   }
 });
 
+app.post('/api/files/create-file', async (req, res) => {
+  const { dir, name } = req.body;
+  if (!dir || !name) return res.status(400).json({ error: 'dir and name required' });
+  const filePath = path.join(dir, name);
+  try {
+    await fs.promises.writeFile(filePath, '', { flag: 'wx' });
+    res.json({ success: true, path: filePath });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/files/create-dir', async (req, res) => {
+  const { dir, name } = req.body;
+  if (!dir || !name) return res.status(400).json({ error: 'dir and name required' });
+  const dirPath = path.join(dir, name);
+  try {
+    await fs.promises.mkdir(dirPath);
+    res.json({ success: true, path: dirPath });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/files/read', async (req, res) => {
   const filePath = req.query.path as string;
   try {
@@ -111,7 +136,201 @@ app.post('/api/files/write', async (req, res) => {
   }
 });
 
+// Agent endpoint — calls LLM with file-tool system prompt, executes actions
+app.post('/api/agent', async (req, res) => {
+  const { messages, model, baseUrl, workspacePath } = req.body;
+  const targetUrl = (baseUrl || 'http://127.0.0.1:11434').replace(/\/+$/, '') + '/api/chat';
+  const workDir = workspacePath || process.cwd();
+
+  const systemPrompt = `You are an expert coding assistant with direct filesystem access.
+Workspace directory: ${workDir}
+
+ALWAYS respond with a valid JSON object in this exact format — no extra text outside the JSON:
+{
+  "message": "Explanation to the user",
+  "actions": [
+    { "type": "create_dir", "path": "relative/path" },
+    { "type": "write_file", "path": "relative/path/file.ext", "content": "full file content" },
+    { "type": "read_file", "path": "relative/path/file.ext" }
+  ]
+}
+
+Rules:
+- All paths are relative to: ${workDir}
+- "create_dir" creates a directory (recursive)
+- "write_file" creates or overwrites a file with full content (never truncated)
+- "read_file" reads a file when you need to inspect existing code before editing
+- If the user asks a question without file work, return actions: []
+- Always generate complete, working code — not placeholders or snippets
+- For a new project, create all necessary files (main file, requirements/package.json, README, etc.)`;
+
+  try {
+    const response = await axios.post(targetUrl, {
+      model,
+      messages: [{ role: 'system', content: systemPrompt }, ...messages],
+      stream: false,
+      format: 'json',
+    });
+
+    const raw: string = response.data.message?.content || '{}';
+
+    let parsed: { message: string; actions?: any[] };
+    try {
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw);
+    } catch {
+      parsed = { message: raw, actions: [] };
+    }
+
+    const results: any[] = [];
+    for (const action of parsed.actions || []) {
+      try {
+        const absPath = path.isAbsolute(action.path)
+          ? action.path
+          : path.join(workDir, action.path);
+
+        if (action.type === 'create_dir') {
+          await fs.promises.mkdir(absPath, { recursive: true });
+          results.push({ ...action, status: 'ok' });
+        } else if (action.type === 'write_file') {
+          await fs.promises.mkdir(path.dirname(absPath), { recursive: true });
+          await fs.promises.writeFile(absPath, action.content || '', 'utf-8');
+          results.push({ type: action.type, path: action.path, status: 'ok' });
+        } else if (action.type === 'read_file') {
+          const content = await fs.promises.readFile(absPath, 'utf-8');
+          results.push({ ...action, status: 'ok', content });
+        }
+      } catch (e: any) {
+        results.push({ ...action, status: 'error', error: e.message });
+      }
+    }
+
+    res.json({ message: parsed.message || '', actions: results });
+  } catch (error: any) {
+    res.status(500).json({ error: `Agent error: ${error.message}` });
+  }
+});
+
+app.post('/api/agent/stream', async (req, res) => {
+  const { messages, model, baseUrl, workspacePath } = req.body;
+  const targetUrl = (baseUrl || 'http://127.0.0.1:11434').replace(/\/+$/, '') + '/api/chat';
+  const workDir = workspacePath || process.cwd();
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders();
+
+  const send = (data: object) => res.write(`data: ${JSON.stringify(data)}\n\n`);
+
+  const systemPrompt = `You are an expert coding assistant with direct filesystem access.
+Workspace directory: ${workDir}
+
+ALWAYS respond with a valid JSON object in this exact format — no extra text outside the JSON:
+{
+  "message": "Explanation to the user",
+  "actions": [
+    { "type": "create_dir", "path": "relative/path" },
+    { "type": "write_file", "path": "relative/path/file.ext", "content": "full file content" },
+    { "type": "read_file", "path": "relative/path/file.ext" }
+  ]
+}
+
+Rules:
+- All paths are relative to: ${workDir}
+- "create_dir" creates a directory (use recursive mkdir)
+- "write_file" creates or overwrites a file with COMPLETE content (never truncated)
+- "read_file" reads a file when you need to inspect existing code before editing
+- If the user asks a question without file work, return actions: []
+- Always generate complete, working code — not placeholders or snippets
+- For a new project, create ALL necessary files (main file, requirements/package.json, README, etc.)`;
+
+  try {
+    send({ type: 'thinking', label: 'Connecting to LLM…' });
+
+    const response = await axios.post(targetUrl, {
+      model,
+      messages: [{ role: 'system', content: systemPrompt }, ...messages],
+      stream: false,
+      format: 'json',
+    });
+
+    send({ type: 'thinking', label: 'Parsing plan…' });
+
+    const raw: string = response.data.message?.content || '{}';
+    let parsed: { message: string; actions?: any[] };
+    try {
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw);
+    } catch {
+      parsed = { message: raw, actions: [] };
+    }
+
+    const actions: any[] = parsed.actions || [];
+    send({ type: 'plan', total: actions.length });
+
+    const results: any[] = [];
+    for (const action of actions) {
+      const id = `${action.type}::${action.path}`;
+      send({ type: 'action_start', id, actionType: action.type, path: action.path });
+      try {
+        const absPath = path.isAbsolute(action.path) ? action.path : path.join(workDir, action.path);
+        if (action.type === 'create_dir') {
+          await fs.promises.mkdir(absPath, { recursive: true });
+          send({ type: 'action_done', id, status: 'ok' });
+          results.push({ type: action.type, path: action.path, status: 'ok' });
+        } else if (action.type === 'write_file') {
+          await fs.promises.mkdir(path.dirname(absPath), { recursive: true });
+          await fs.promises.writeFile(absPath, action.content || '', 'utf-8');
+          send({ type: 'action_done', id, status: 'ok' });
+          results.push({ type: action.type, path: action.path, status: 'ok' });
+        } else if (action.type === 'read_file') {
+          const content = await fs.promises.readFile(absPath, 'utf-8');
+          send({ type: 'action_done', id, status: 'ok', content });
+          results.push({ type: action.type, path: action.path, status: 'ok' });
+        }
+      } catch (e: any) {
+        send({ type: 'action_done', id, status: 'error', error: e.message });
+        results.push({ type: action.type, path: action.path, status: 'error', error: e.message });
+      }
+    }
+
+    send({ type: 'message', content: parsed.message || '' });
+    send({ type: 'done', actions: results });
+    res.end();
+  } catch (error: any) {
+    send({ type: 'error', message: `Agent error: ${error.message}` });
+    res.end();
+  }
+});
+
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+
+// Auth endpoints
+app.post('/api/auth/register', async (req, res) => {
+  const { name, email, password } = req.body;
+  if (!name || !email || !password) return res.status(400).json({ error: 'Name, email and password are required.' });
+  if (password.length < 6) return res.status(400).json({ error: 'Password must be at least 6 characters.' });
+  const result = await authManager.register(name, email, password);
+  if ('error' in result) return res.status(400).json(result);
+  res.json(result);
+});
+
+app.post('/api/auth/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'Email and password are required.' });
+  const result = await authManager.login(email, password);
+  if ('error' in result) return res.status(401).json(result);
+  res.json(result);
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith('Bearer ')) return res.status(401).json({ error: 'No token.' });
+  const user = authManager.verifyToken(auth.slice(7));
+  if (!user) return res.status(401).json({ error: 'Invalid or expired token.' });
+  res.json({ user });
+});
 
 // Database endpoints
 app.get('/api/db/status', (req, res) => {

@@ -4,6 +4,9 @@ import { motion, AnimatePresence } from 'framer-motion';
 
 import { Code2, Video, BrainCircuit, Settings } from 'lucide-react';
 import DbConnectionModal from './DbConnectionModal';
+import AuthModal from './AuthModal';
+import UserProfile from './UserProfile';
+import { useAuthStore } from '../store/authStore';
 import './Shell.css';
 
 // Lazy loaded components
@@ -15,6 +18,9 @@ const FileExplorer = React.lazy(() => import('./FileExplorer').catch(() => ({ de
 
 export const Shell: React.FC = () => {
   const { activeModule, setActiveModule } = useUIStore();
+  const { checkAuth } = useAuthStore();
+
+  React.useEffect(() => { checkAuth(); }, [checkAuth]);
 
   const navItems = [
     { id: 'coding', icon: Code2, label: 'Code Assistant' },
@@ -35,6 +41,7 @@ export const Shell: React.FC = () => {
   return (
     <div className="app-shell">
       <DbConnectionModal />
+      <AuthModal />
       <div className="gradient-blob gradient-blob-1" />
       <div className="gradient-blob gradient-blob-2" />
       
@@ -59,13 +66,14 @@ export const Shell: React.FC = () => {
         </nav>
         
         <div className="header-actions">
-          <button 
+          <button
             className={`btn btn-ghost toggle-btn ${activeModule === 'settings' ? 'active' : ''}`}
             onClick={() => setActiveModule('settings')}
             title="Settings"
           >
             <Settings size={20} />
           </button>
+          <UserProfile />
         </div>
       </header>
 
