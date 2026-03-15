@@ -1,0 +1,61 @@
+.editor-pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: rgba(30, 30, 30, 0.4); /* subtle dark background matching monaco */
+}
+
+.editor-header {
+  padding: 8px 16px;
+  background: rgba(0, 0, 0, 0.2);
+  border-bottom: 1px solid var(--border-color);
+  min-height: 48px;
+}
+
+.file-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.file-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.dirty-indicator {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background-color: var(--text-primary);
+}
+
+.editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.error-text {
+  color: var(--accent-secondary);
+  font-size: 12px;
+  gap: 4px;
+}
+
+.editor-body {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.loading-state {
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+/* Override Monaco theme specifics slightly if needed */
+.monaco-editor {
+  padding-top: 8px;
+}
